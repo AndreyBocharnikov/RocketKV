@@ -15,18 +15,18 @@ with read_base():
         needlebench_en_datasets,
     )
 
-datasets = needlebench_en_datasets + text2json_datasets
+datasets = text2json_datasets # needlebench_en_datasets
 
 models = [
-    dict(
-        type='RocketKVChatBot',
-        path='meta-llama/Llama-3.1-8B-Instruct',
-        token_budget=2048,
-        max_seq_len=128 * 1024,
-        batch_size=1,
-        run_cfg=dict(num_gpus=1),
-        abbr='rocket;llama;token_budget=2048',
-    ),
+   # dict(
+   #     type='RocketKVChatBot',
+    #    path='meta-llama/Llama-3.1-8B-Instruct',
+    #    token_budget=2048,
+     #   max_seq_len=128 * 1024,
+     #   batch_size=1,
+     #   run_cfg=dict(num_gpus=1),
+     #   abbr='rocket;llama;token_budget=2048',
+    #),
     dict(
         type='RocketKVChatBot',
         path='Qwen/Qwen3-4B-Instruct-2507',
@@ -34,7 +34,8 @@ models = [
         max_seq_len=128 * 1024,
         batch_size=1,
         run_cfg=dict(num_gpus=1),
-        abbr='rocket;qwen3-4b;token_budget=0.015625',
+        local_window=64,
+        abbr='rocket;qwen3-4b;token_budget=2048',
     ),
     # Qwen3-MoE (e.g. Qwen3-30B-A3B): same wrapper, just give it more GPUs.
     # dict(

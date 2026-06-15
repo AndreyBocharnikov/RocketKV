@@ -112,7 +112,7 @@ import pdb
 
 kv_pos = 0
 
-def rocket_forward(fattn: bool, topk: int, compression_ratio: float, prompt_budget: int, window_size: int = 32, kernel_size: int = 63, skip_layers: int = 0, *args, **kwargs):
+def rocket_forward(fattn: bool, topk: int, compression_ratio: float, prompt_budget: int, window_size: int = 32, kernel_size: int = 63, skip_layers: int = 0, local_window: int = 0, *args, **kwargs):
     def forward(self, query : torch.Tensor,
                     key_value : torch.Tensor,
                     position_bias : Optional[torch.Tensor],
@@ -265,8 +265,23 @@ def rocket_forward(fattn: bool, topk: int, compression_ratio: float, prompt_budg
             s_hat = _scaled_softmax(masked_QK_hat, scale, dim=-1)
 
             # 3. Gather top k positions based on approximate attention scores & run attention
-            k = min(topk, len_k)
-            s_hat_i2, i2 = torch.topk(s_hat.mean(dim=2, keepdim=True), k, dim=-1)
+            # Always keep the most recent `local_window` tokens so sparse decode
+            # never drops just-generated local context. Without this, the coarse
+            # top-r-channel score approximation can rank recent tokens out of the
+            # top-k; models with per-head q/k-norm (Qwen3) flatten the query
+            # channel magnitudes, making that miss frequent -> the model loses
+            # track of what it just wrote and repeats tokens ("TheThe", "Z Zambot").
+            #
+            # The window is EXTRA budget on top of `topk`: we widen the selection
+            # to topk + local_window and pin the recent tokens (score = +inf), so
+            # the score-based topk still gets its full quota from the older tokens
+            # and the recent window is added, not carved out of it.
+            # local_window == 0 reproduces the original (validated) RocketKV.
+            k = min(topk + local_window, len_k)
+            mean_s_hat = s_hat.mean(dim=2, keepdim=True)
+            if local_window > 0 and len_k > k:
+                mean_s_hat[..., -local_window:] = float("inf")
+            s_hat_i2, i2 = torch.topk(mean_s_hat, k, dim=-1)
             iKV = i2[..., 0, :, None] # (batch_size, n_kv_heads, 1, q_len=1, k=5120) ==> (batch_size, n_kv_heads, q_len, k, 1)
             QK = Q @ _gather(K, -2, iKV).transpose(-1, -2)
             masked_QK = torch.where(_gather(attention_mask.unsqueeze(2).expand_as(QK_hat), -1, i2), QK, float("-inf"))

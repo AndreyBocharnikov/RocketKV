@@ -59,6 +59,16 @@ class RocketKVChatBot(HuggingFacewithChatTemplate):
         max_seq_len: maximum allowed prompt length. Prompts longer than this
             raise an assertion (no truncation -- that keeps the behaviour
             transparent, unlike RocketKV's 'middle' truncation hack).
+        local_window: number of most-recent tokens always attended during sparse
+            decode, as EXTRA budget on top of the top-k token quota (token_budget
+            // 2), not carved out of it. Qwen3's per-head q/k-norm flattens the
+            query channel magnitudes, which makes RocketKV's coarse top-r-channel
+            score approximation drop recent tokens during decode -> the model
+            loses local context and stutters (token doubling: "TheThe", "Z
+            Zambot"), wrecking exact-match scores at aggressive budgets. A small
+            window pins recent tokens in and fixes it. Default: 128 for Qwen3, 0
+            for Llama (0 == exactly the validated RocketKV behaviour). Pass an int
+            to override.
     """
 
     def __init__(
@@ -66,6 +76,7 @@ class RocketKVChatBot(HuggingFacewithChatTemplate):
         path: str,
         token_budget: Union[int, float],
         max_seq_len: int = 128 * 1024,
+        local_window: int = None,
         **kwargs,
     ):
         # 'qwen3' matches both dense Qwen3 and Qwen3-MoE (e.g. Qwen3-30B-A3B);
@@ -77,6 +88,11 @@ class RocketKVChatBot(HuggingFacewithChatTemplate):
                 f"RocketKVChatBot supports Llama and Qwen3 / Qwen3-MoE models "
                 f"only, got '{path}'.")
 
+        # Auto-enable the local decode window for q/k-norm models (Qwen3); keep
+        # Llama on the validated path (0) unless the caller overrides.
+        if local_window is None:
+            local_window = 128 if 'qwen3' in lower else 0
+
         self.dynamic_budget = isinstance(token_budget, float)
         self.pipeline_params = dict(
             model_name=path,
@@ -85,6 +101,7 @@ class RocketKVChatBot(HuggingFacewithChatTemplate):
             base=None,
             fattn=True,
             method='rocket',
+            local_window=local_window,
         )
         if not self.dynamic_budget:
             self.pipeline_params["token_budget"] = token_budget
