@@ -162,7 +162,7 @@ class GreedySearch:
                         attention_mask = attention_mask[:, :ed],
                         use_cache = True,
                         return_dict = True,
-                        num_logits_to_keep = 1,
+                        logits_to_keep = 1,
                         past_key_values = past_key_values
                     )
                     logits, past_key_values = out.logits, out.past_key_values
@@ -172,7 +172,7 @@ class GreedySearch:
                     attention_mask = attention_mask,
                     use_cache = True,
                     return_dict = True,
-                    num_logits_to_keep = 1,
+                    logits_to_keep = 1,
                     past_key_values = past_key_values
                 )
                 logits, past_key_values = out.logits, out.past_key_values
@@ -181,7 +181,7 @@ class GreedySearch:
                     input_ids = input_ids[:, -1:],
                     attention_mask = attention_mask,
                     past_key_values = past_key_values,
-                    num_logits_to_keep = 1,
+                    logits_to_keep = 1,
                     use_cache = True,
                     return_dict = True
                 )

@@ -112,6 +112,7 @@ from inf_llm import patch_hf, GreedySearch, patch_model_center
 import torch
 import numpy as np
 import math
+import pdb
 
 def post_process(pred, chat_template, dataset):
     if chat_template == "qwen":
@@ -149,11 +150,15 @@ def compress(eval_params, pipeline_params, max_seq_len, total_max_new_tokens, mo
             r = 0.3
         else:
             r = min(0.2+math.log2(compression_ratio)*0.06, 0.8)
-        token_capacity_budget = int(float(max_seq_len)/(compression_ratio**r))
+        # tokens left after stage 1
+        token_capacity_budget = int(float(max_seq_len)/(compression_ratio ** r))
         token_capacity_budget = max(token_capacity_budget , min(2*total_max_new_tokens, max_seq_len))
+        # number of tokens from the prompt that can be used for sparse attention selection
         pipeline_params['prompt_budget'] = token_capacity_budget - total_max_new_tokens
+        # one half for sequence dimention, other for channels dimention
         pipeline_params['topk'] = int(pipeline_params['token_budget']//2)
         pipeline_params['compression_ratio'] = max(1.0, float(token_capacity_budget)/pipeline_params['token_budget'])
+
     compressed_model = patch_hf(model, pipeline_params['method'], **pipeline_params)
     return compressed_model
 

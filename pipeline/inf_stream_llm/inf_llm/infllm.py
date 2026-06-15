@@ -106,41 +106,40 @@
 
 import torch
 from .utils import patch_hf, GreedySearch, patch_model_center
-from transformers import LlamaConfig, MistralConfig, AutoTokenizer, LlamaForCausalLM, MistralForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+# RocketKV supports these architectures only. Mistral / Qwen2 / longchat are
+# intentionally unsupported (old models we won't evaluate).
+SUPPORTED_MODEL_TYPES = ('llama', 'qwen3', 'qwen3_moe')
+
 
 def initialize_model_tokenizer(pipeline_config):
     dtype = torch.float16
-    model = None
-    tokenizer = None
+    model_name = pipeline_config['model_name']
 
-    if 'llama' in pipeline_config['model_name'].lower() or 'longchat' in pipeline_config['model_name'].lower():
-        config = LlamaConfig.from_pretrained(pipeline_config['model_name'])
-        if 'llama' in pipeline_config['model_name'].lower():
-            config.rope_theta *= pipeline_config['rope_theta_factor']
-        tokenizer = AutoTokenizer.from_pretrained(pipeline_config['tokenizer_name'], padding_side="left")
-        tokenizer.pad_token = tokenizer.eos_token
-        model = LlamaForCausalLM.from_pretrained(
-            pretrained_model_name_or_path=pipeline_config['model_name'],
-            config=config,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=True,
-            use_flash_attention_2=True,
-            device_map="auto",
-        )
+    # Dispatch on the real architecture (AutoConfig.model_type) rather than on
+    # substrings of the path -- this reliably distinguishes dense Qwen3 from
+    # Qwen3-MoE and is robust to arbitrary path naming.
+    config = AutoConfig.from_pretrained(model_name)
+    model_type = getattr(config, 'model_type', '')
+    if model_type not in SUPPORTED_MODEL_TYPES:
+        raise ValueError(
+            f"Unsupported model_type '{model_type}' for '{model_name}'. "
+            f"RocketKV supports {SUPPORTED_MODEL_TYPES} only.")
 
-    elif 'mistral' in pipeline_config['model_name'].lower():
-        config = MistralConfig.from_pretrained(pipeline_config['model_name'])
-        tokenizer = AutoTokenizer.from_pretrained(pipeline_config['tokenizer_name'],
-                                            use_fast=False,
-                                            padding_side="left",
-                                            trust_remote_code=True)
-        tokenizer.pad_token = tokenizer.eos_token
-        model = MistralForCausalLM.from_pretrained(
-                pretrained_model_name_or_path=pipeline_config['model_name'],
-                config=config,
-                torch_dtype=dtype,
-                low_cpu_mem_usage=True,
-                use_flash_attention_2=True,
-                device_map="auto",
-            )
+    if model_type == 'llama':
+        rope_theta_factor = pipeline_config['rope_theta_factor']
+        config.rope_scaling["rope_theta"] *= rope_theta_factor
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        pipeline_config['tokenizer_name'], padding_side="left")
+    tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(
+        pretrained_model_name_or_path=model_name,
+        config=config,
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
+        attn_implementation="flash_attention_2",
+        device_map="auto",
+    )
     return model, tokenizer

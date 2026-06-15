@@ -17,7 +17,7 @@ import torch
 import torch.profiler
 from rouge import Rouge
 from tqdm import tqdm
-from transformers import GenerationConfig, SinkCache
+from transformers import GenerationConfig
 
 DATA_NAME_TO_PATH = {
     "scbench_choice_eng": "scbench_choice_eng.jsonl",

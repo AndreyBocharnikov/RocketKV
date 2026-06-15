@@ -108,6 +108,7 @@ import torch
 import math
 from typing import Optional
 from .utils import repeat_kv
+import pdb
 
 kv_pos = 0
 
@@ -178,23 +179,22 @@ def rocket_forward(fattn: bool, topk: int, compression_ratio: float, prompt_budg
                     attention_mask.view(1, 1, obs_window_size, len_k)==False,
                     torch.scalar_tensor(0, device=score.device, dtype=score.dtype)
                 )
-                score = score[:,:,-obs_window_size:,:-obs_window_size].sum(dim=-2)
-                score = score.view(batch_size,num_heads_kv,-1,len_k-obs_window_size).sum(dim=2)
-                score = torch.nn.functional.max_pool1d(score, kernel_size=kernel_size, padding=kernel_size//2, stride=1)
-                indices = score.topk(prompt_budget-obs_window_size, dim=-1).indices.sort().values
+                score = score[:, :, -obs_window_size:, :-obs_window_size].sum(dim=-2)
+                score = score.view(batch_size, num_heads_kv, -1, len_k-obs_window_size).sum(dim=2)
+                score = torch.nn.functional.max_pool1d(score, kernel_size=kernel_size, padding=kernel_size // 2, stride=1)
+                indices = score.topk(prompt_budget - obs_window_size, dim=-1).indices.sort().values
                 indices = indices.unsqueeze(-1).expand(-1,-1,-1,dim_head)
                 h_k_cur,h_v_cur = current_key_value
-                h_k_compress = h_k_cur[:,:,:-obs_window_size].gather(dim=2, index=indices)
-                h_v_compress = h_v_cur[:,:,:-obs_window_size].gather(dim=2, index=indices)
-                h_k_snap = torch.cat([h_k_compress, h_k_cur[:,:,-obs_window_size:]], dim=2)
-                h_v_snap = torch.cat([h_v_compress, h_v_cur[:,:,-obs_window_size:]], dim=2)
-                current_key_value = h_k_snap,h_v_snap
+                h_k_compress = h_k_cur[:, :, :-obs_window_size].gather(dim=2, index=indices)
+                h_v_compress = h_v_cur[:, :, :-obs_window_size].gather(dim=2, index=indices)
+                h_k_snap = torch.cat([h_k_compress, h_k_cur[:, :, -obs_window_size:]], dim=2)
+                h_v_snap = torch.cat([h_v_compress, h_v_cur[:, :, -obs_window_size:]], dim=2)
+                current_key_value = h_k_snap, h_v_snap
             from flash_attn.flash_attn_interface import flash_attn_func
             h_q = h_q.transpose(1, 2)
             h_k2 = h_k2.transpose(1, 2)
             h_v2 = h_v2.transpose(1, 2)
             o = flash_attn_func(h_q, h_k2, h_v2, causal=True)
-                 
         else:
             #hybrid sparse attention
             dist = torch.arange(0, len_q, device=h_q.device)[:, None] - torch.arange(0, len_k, device=h_q.device)[None, :] + len_k - len_q
@@ -244,17 +244,18 @@ def rocket_forward(fattn: bool, topk: int, compression_ratio: float, prompt_budg
 
             # 2. Approximate attention scores using r largest components of Q
             # compression ratio for head dim reduction
-            r = int(Q.shape[-1]*chunk_size/compression_ratio)
+            r = int(Q.shape[-1] * chunk_size / compression_ratio)
             absQ = torch.abs(Q)
             i1 = torch.topk(absQ.mean(dim=2, keepdim=True), r, dim=-1).indices
+            # Q_hat and K_had has only r channels
             Q_hat, K_hat = _gather(positive_query, -1, i1), _gather(chunk_max_key, -1, i1)
             QK_hat = Q_hat @ K_hat.transpose(-1, -2)
-            QK_hat = QK_hat.unsqueeze(-1).repeat(1,1,1,1,1,chunk_size).reshape(
+            QK_hat = QK_hat.unsqueeze(-1).repeat(1, 1, 1, 1, 1, chunk_size).reshape(
                 QK_hat.shape[0],
                 QK_hat.shape[1],
                 QK_hat.shape[2],
                 QK_hat.shape[3],
-                -1)[:,:,:,:,:len_k]
+                -1)[:, :, :, :, :len_k] # n_chunks, chunk_size ==> n_chunks * chunk_size ==> remove padding
             masked_QK_hat = torch.where(attention_mask.unsqueeze(2), QK_hat, float("-inf"))
             scale = torch.sqrt(
                 Q.shape[-1]
@@ -266,7 +267,7 @@ def rocket_forward(fattn: bool, topk: int, compression_ratio: float, prompt_budg
             # 3. Gather top k positions based on approximate attention scores & run attention
             k = min(topk, len_k)
             s_hat_i2, i2 = torch.topk(s_hat.mean(dim=2, keepdim=True), k, dim=-1)
-            iKV = i2[..., 0, :, None]
+            iKV = i2[..., 0, :, None] # (batch_size, n_kv_heads, 1, q_len=1, k=5120) ==> (batch_size, n_kv_heads, q_len, k, 1)
             QK = Q @ _gather(K, -2, iKV).transpose(-1, -2)
             masked_QK = torch.where(_gather(attention_mask.unsqueeze(2).expand_as(QK_hat), -1, i2), QK, float("-inf"))
             s = _scaled_softmax(masked_QK, Q.shape[-1] ** 0.5, dim=-1)

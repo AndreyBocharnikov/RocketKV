@@ -119,19 +119,45 @@ def huggingface_forward(forward):
         **kwargs,
     ):
         assert not output_attentions
+        num_heads = getattr(self, "num_heads", self.config.num_attention_heads)
+        num_key_value_heads = getattr(self, "num_key_value_heads", self.config.num_key_value_heads)
+        head_dim = self.head_dim
+
+        # Qwen3 / Qwen3-MoE apply a per-head RMSNorm (q_norm / k_norm) to the
+        # queries and keys before RoPE. Llama has neither, so for Llama these
+        # wrappers collapse to the plain projection and behaviour is unchanged.
+        q_norm = getattr(self, "q_norm", None)
+        k_norm = getattr(self, "k_norm", None)
+        if q_norm is None and k_norm is None:
+            project_q, project_k = self.q_proj, self.k_proj
+        else:
+            def project_q(x):
+                h = self.q_proj(x)
+                h = h.view(*h.shape[:-1], num_heads, head_dim)
+                if q_norm is not None:
+                    h = q_norm(h)
+                return h.reshape(*h.shape[:-2], num_heads * head_dim)
+
+            def project_k(x):
+                h = self.k_proj(x)
+                h = h.view(*h.shape[:-1], num_key_value_heads, head_dim)
+                if k_norm is not None:
+                    h = k_norm(h)
+                return h.reshape(*h.shape[:-2], num_key_value_heads * head_dim)
+
         ret = forward(
             self, hidden_states, hidden_states,
             position_ids, use_cache, past_key_value,
-            self.q_proj, self.k_proj, self.v_proj, self.o_proj, 
-            self.head_dim, self.num_heads, self.num_key_value_heads
+            project_q, project_k, self.v_proj, self.o_proj,
+            head_dim, num_heads, num_key_value_heads,
         )
         if use_cache:
             o, pkv = ret
         else:
             o = ret
             pkv = None
-
-        return o, None, pkv
+        self._rocket_cache = pkv
+        return o, None
 
     return hf_forward
 
@@ -147,11 +173,9 @@ def patch_hf(
     **kwargs
 ):
     attn_kwargs.update(kwargs)
-    # This approach lacks scalability and will be refactored.
-    from transformers import LlamaForCausalLM, MistralForCausalLM # Qwen2ForCausalLM
-    from transformers.models.llama.modeling_llama import LlamaAttention, LlamaModel, BaseModelOutputWithPast
-    from transformers.models.mistral.modeling_mistral import MistralAttention, MistralModel
-    # from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, Qwen2Model
+    from transformers import (
+        LlamaForCausalLM, Qwen3ForCausalLM, Qwen3MoeForCausalLM)
+    from transformers.models.llama.modeling_llama import BaseModelOutputWithPast
 
     def model_forward(
         self,
@@ -195,7 +219,6 @@ def patch_hf(
 
         else:
             pkv = None
-            
 
         hidden_states = inputs_embeds
 
@@ -216,10 +239,10 @@ def patch_hf(
                 use_cache=use_cache,
             )
 
-            hidden_states = layer_outputs[0]
+            hidden_states = layer_outputs
 
             if use_cache:
-                _cache = layer_outputs[2 if output_attentions else 1]
+                _cache = decoder_layer.self_attn._rocket_cache
                 pkv = pkv + (_cache,)
 
             if output_attentions:
@@ -242,41 +265,33 @@ def patch_hf(
 
     forward = huggingface_forward(ATTN_FORWRAD[attn_type](**attn_kwargs))
 
-    if isinstance(model, LlamaForCausalLM):
-        Attention = model.model.layers[0].self_attn.__class__
-        Model = model.model.__class__
-    elif isinstance(model, MistralForCausalLM):
-        Attention = model.model.layers[0].self_attn.__class__
-        Model = model.model.__class__
-    elif isinstance(model, Qwen2ForCausalLM):
-        Attention = model.model.layers[0].self_attn.__class__
-        Model = model.model.__class__
-    elif model.__class__.__name__ == "MiniCPMForCausalLM":
+    if isinstance(model, (LlamaForCausalLM, Qwen3ForCausalLM, Qwen3MoeForCausalLM)):
         Attention = model.model.layers[0].self_attn.__class__
         Model = model.model.__class__
     else:
-        raise ValueError("Only supports llama, mistral and qwen2 models.")
+        raise ValueError("Only supports llama, qwen3 and qwen3_moe models.")
     
-    hf_rope = model.model.layers[0].self_attn.rotary_emb
-    if isinstance(model, LlamaForCausalLM):
-        base = base * rope_theta_factor if (base is not None and rope_theta_factor is not None) else hf_rope.config.rope_theta
-        distance_scale = distance_scale if distance_scale is not None else 1.0
-        rope = RotaryEmbeddingESM(
-            hf_rope.config.hidden_size//hf_rope.config.num_attention_heads,
-            base,
-            distance_scale,
-            rope_linear_scaling_factor,
-            hf_rope.config
-        )
+    # Build the replacement RoPE from model.config for every supported model.
+    # In transformers 5.x the rotary module is config-driven (no .dim / .base
+    # attrs), and rope_scaling / rope_parameters both carry rope_theta, so a
+    # single path covers Llama and Qwen3 / Qwen3-MoE. We hand the real config to
+    # RotaryEmbeddingESM unconditionally: its llama3 frequency rescaling
+    # self-gates on rope_type == "llama3", so it fires for Llama-3.1 and is a
+    # no-op for Qwen3's default RoPE.
+    cfg = model.config
+    if base is not None and rope_theta_factor is not None:
+        base = base * rope_theta_factor
     else:
-        base = base * rope_theta_factor if (base is not None and rope_theta_factor is not None) else hf_rope.base
-        distance_scale = distance_scale if distance_scale is not None else 1.0
-        rope = RotaryEmbeddingESM(
-            hf_rope.dim,
-            base,
-            distance_scale,
-            rope_linear_scaling_factor
-        )
+        base = cfg.rope_parameters["rope_theta"]
+    head_dim = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
+    distance_scale = distance_scale if distance_scale is not None else 1.0
+    rope = RotaryEmbeddingESM(
+        head_dim,
+        base,
+        distance_scale,
+        rope_linear_scaling_factor,
+        cfg,
+    )
     
     model.model.position_bias = rope
     

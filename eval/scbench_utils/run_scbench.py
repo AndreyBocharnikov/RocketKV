@@ -40,7 +40,6 @@ from transformers import (
     MambaForCausalLM,
     Qwen2ForCausalLM,
 )
-from transformers.cache_utils import SinkCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils.import_utils import _is_package_available
 
